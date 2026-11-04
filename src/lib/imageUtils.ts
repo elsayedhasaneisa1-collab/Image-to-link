@@ -46,42 +46,123 @@ export function dataUrlToBlob(dataUrl: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
-/** Compress an image file via canvas */
+export interface CompressOptions {
+  maxDimension: number;
+  quality: number;
+  format: ImgFormat;
+  /** الحد الأقصى لحجم الملف بالكيلوبايت — الافتراضي 500 KB */
+  targetSizeKB?: number;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("فشل الضغط"))), mime, quality)
+  );
+}
+
+/**
+ * ضغط ذكي: يجرّب أعلى جودة ممكنة، ولو الحجم أكبر من المطلوب
+ * يقلّل الجودة تدريجياً (binary search) ثم الأبعاد حتى يصبح الملف أقل من الحد المطلوب.
+ */
 export async function compressImage(
   file: File | Blob,
-  opts: { maxDimension: number; quality: number; format: ImgFormat }
+  opts: CompressOptions
 ): Promise<{ blob: Blob; width: number; height: number; mime: string }> {
   const bitmap = await createImageBitmap(file as Blob);
-  const { width: iw, height: ih } = bitmap;
-  const scale = Math.min(1, opts.maxDimension / Math.max(iw, ih));
-  const w = Math.max(1, Math.round(iw * scale));
-  const h = Math.max(1, Math.round(ih * scale));
+  const iw = bitmap.width;
+  const ih = bitmap.height;
+  const targetKB = Math.max(50, opts.targetSizeKB ?? 500);
+  const maxBytes = targetKB * 1024; // نقارن بـ < حتى يكون الناتج أقل من الحد فعلاً
 
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d")!;
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close?.();
-
+  const sourceMime = (file as File).type || "image/png";
   let mime = "image/webp";
   if (opts.format === "jpeg") mime = "image/jpeg";
   else if (opts.format === "png") mime = "image/png";
   else if (opts.format === "original") {
-    mime = (file as File).type || "image/png";
-    if (!mime.startsWith("image/")) mime = "image/png";
-    // gif / svg keep as-is via direct blob (no canvas re-encode to preserve animation)
-    if (mime === "image/gif" || mime === "image/svg+xml") {
-      return { blob: file as Blob, width: iw, height: ih, mime };
+    // لو الملف الأصلي أصلاً أقل من 500 KB نحتفظ به كما هو (بما في ذلك GIF المتحرك)
+    if (file.size < maxBytes) {
+      bitmap.close?.();
+      return { blob: file as Blob, width: iw, height: ih, mime: sourceMime };
     }
+    mime = ["image/jpeg", "image/png", "image/webp"].includes(sourceMime) ? sourceMime : "image/webp";
   }
+  if (!["image/webp", "image/jpeg", "image/png"].includes(mime)) mime = "image/webp";
 
-  const blob: Blob = await new Promise((resolve, reject) =>
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("فشل الضغط"))), mime, opts.quality / 100)
-  );
-  return { blob, width: w, height: h, mime };
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  const initialScale = Math.min(1, opts.maxDimension / Math.max(iw, ih));
+  let w = Math.max(1, Math.round(iw * initialScale));
+  let h = Math.max(1, Math.round(ih * initialScale));
+  const maxQuality = Math.max(5, Math.min(100, opts.quality));
+
+  const draw = () => {
+    canvas.width = w;
+    canvas.height = h;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, 0, 0, w, h);
+  };
+
+  try {
+    for (let attempt = 0; attempt < 14; attempt++) {
+      draw();
+      let lastSize = Number.POSITIVE_INFINITY;
+
+      if (mime === "image/png") {
+        // PNG لا يتأثر بإعداد الجودة — نختبره ثم نصغّر الأبعاد عند الحاجة
+        const blob = await canvasToBlob(canvas, mime, 1);
+        lastSize = blob.size;
+        if (blob.size < maxBytes) return { blob, width: w, height: h, mime };
+      } else {
+        // جرّب الجودة المطلوبة أولاً
+        const first = await canvasToBlob(canvas, mime, maxQuality / 100);
+        lastSize = first.size;
+        if (first.size < maxBytes) return { blob: first, width: w, height: h, mime };
+
+        // ابحث عن أعلى جودة تحقق الحجم المطلوب
+        let low = 5;
+        let high = maxQuality - 1;
+        let best: Blob | null = null;
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          const blob = await canvasToBlob(canvas, mime, mid / 100);
+          lastSize = Math.min(lastSize, blob.size);
+          if (blob.size < maxBytes) {
+            best = blob;
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+        if (best) return { blob: best, width: w, height: h, mime };
+      }
+
+      // الحجم ما زال كبيراً: قلّل الأبعاد بنسبة محسوبة من الحجم الحالي
+      if (Math.max(w, h) <= 64) {
+        if (mime !== "image/webp") {
+          mime = "image/webp"; // أقوى ضغط كمحاولة أخيرة
+          continue;
+        }
+        break;
+      }
+      const ratio = Math.sqrt(maxBytes / Math.max(lastSize, 1));
+      const factor = Math.max(0.42, Math.min(0.88, ratio * 0.9));
+      const nw = Math.max(48, Math.round(w * factor));
+      const nh = Math.max(48, Math.round(h * factor));
+      w = nw === w ? Math.max(48, w - 24) : nw;
+      h = nh === h ? Math.max(48, h - 24) : nh;
+    }
+
+    // ضمان نهائي: صورة صغيرة WebP — حجمها أقل بكثير من 500 KB
+    const finalScale = Math.min(1, 64 / Math.max(iw, ih));
+    w = Math.max(1, Math.round(iw * finalScale));
+    h = Math.max(1, Math.round(ih * finalScale));
+    draw();
+    const blob = await canvasToBlob(canvas, "image/webp", 0.25);
+    return { blob, width: w, height: h, mime: "image/webp" };
+  } finally {
+    bitmap.close?.();
+  }
 }
 
 /** Encode dataUrl into URL-safe payload for hash */
@@ -125,7 +206,7 @@ export function getHashImage(): string | null {
 
 export async function processFile(
   file: File,
-  opts: { maxDimension: number; quality: number; format: ImgFormat }
+  opts: CompressOptions
 ): Promise<ProcessedImage> {
   const { blob, width, height, mime } = await compressImage(file, opts);
   const dataUrl = await blobToDataUrl(blob);
