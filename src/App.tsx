@@ -105,7 +105,7 @@ function Viewer({ dataUrl }: { dataUrl: string }) {
 /* ---------------- Main App ---------------- */
 export default function App() {
   const sharedDataUrl = useMemo(() => getHashImage(), []);
-  const [settings, setSettings] = useState({ maxDimension: 1400, quality: 85, format: "webp" as ImgFormat });
+  const [settings, setSettings] = useState({ maxDimension: 1400, quality: 85, format: "webp" as ImgFormat, targetSizeKB: 500 });
   const [results, setResults] = useState<ProcessedImage[]>([]);
   const [gallery, setGallery] = useState<ProcessedImage[]>([]);
   const [dragOver, setDragOver] = useState(false);
@@ -299,6 +299,7 @@ export default function App() {
                 <p className="text-xl font-bold">{dragOver ? "سيب الصورة هنا!" : "اسحب صورتك هنا"}</p>
                 <p className="text-zinc-500 text-sm mt-2">أو اضغط للاختيار • أو الصق بـ <kbd className="bg-white/10 px-2 py-0.5 rounded font-mono-latin text-xs" dir="ltr">Ctrl + V</kbd></p>
                 <p className="text-xs text-zinc-600 mt-3">PNG • JPG • WebP • GIF — صور متعددة مسموحة</p>
+                <p className="inline-flex items-center gap-1.5 text-xs text-[#c8ff2e] bg-[#c8ff2e]/10 border border-[#c8ff2e]/25 rounded-full px-3 py-1.5 mt-3 font-semibold"><Zap className="w-3.5 h-3.5" /> ضغط تلقائي — الناتج أقل من {settings.targetSizeKB} KB</p>
               </div>
 
               <div className="grid grid-cols-3 gap-2 mt-3">
@@ -331,6 +332,17 @@ export default function App() {
                   <span className="text-[11px] text-zinc-500">تُطبّق على الرفع القادم</span>
                 </div>
                 <div className="space-y-4">
+                  <div className="bg-[#c8ff2e]/[.06] border border-[#c8ff2e]/20 rounded-xl p-3">
+                    <div className="flex justify-between text-xs mb-2.5"><span className="text-zinc-300 font-semibold">الحد الأقصى لحجم الصورة</span><span className="font-mono-latin text-[#c8ff2e]">&lt; {settings.targetSizeKB} KB</span></div>
+                    <div className="flex gap-2">
+                      {[100, 250, 500].map((kb) => (
+                        <button key={kb} onClick={() => setSettings({ ...settings, targetSizeKB: kb })} className={cn("flex-1 py-2 rounded-lg text-xs font-mono-latin border transition", settings.targetSizeKB === kb ? "bg-[#c8ff2e] text-zinc-950 border-[#c8ff2e] font-bold" : "bg-white/5 border-white/10 text-zinc-400 hover:bg-white/10")}>
+                          {kb} KB
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-zinc-500 mt-2">بنقلّل الجودة أولاً ثم الأبعاد تلقائياً لحد ما الصورة تبقى أقل من الحجم المطلوب.</p>
+                  </div>
                   <div>
                     <div className="flex justify-between text-xs mb-2"><span className="text-zinc-400">أقصى بُعد</span><span className="font-mono-latin text-[#c8ff2e]">{settings.maxDimension}px</span></div>
                     <input type="range" min={400} max={2400} step={100} value={settings.maxDimension} onChange={(e) => setSettings({ ...settings, maxDimension: +e.target.value })} className="w-full" />
@@ -390,7 +402,7 @@ export default function App() {
                           <h3 className="font-bold truncate">{item.name}</h3>
                           <p className="text-xs text-zinc-500 font-mono-latin mt-1" dir="ltr">{item.width}×{item.height} • {item.format} • {formatBytes(item.compressedSize)} {saved > 0 && <span className="text-[#c8ff2e]">(−{saved}%)</span>}</p>
                         </div>
-                        <span className="shrink-0 text-[11px] bg-[#c8ff2e]/15 text-[#c8ff2e] border border-[#c8ff2e]/30 px-2.5 py-1 rounded-full font-semibold">رابط جاهز ✓</span>
+                        <span className="shrink-0 text-[11px] bg-[#c8ff2e]/15 text-[#c8ff2e] border border-[#c8ff2e]/30 px-2.5 py-1 rounded-full font-semibold">{item.compressedSize < 500 * 1024 ? "أقل من 500 KB ✓" : "رابط جاهز ✓"}</span>
                       </div>
 
                       {isLong && <p className="mt-3 text-xs bg-amber-400/10 border border-amber-400/30 text-amber-300 rounded-xl px-3 py-2">⚠ الرابط طويل ({formatBytes(item.shareLink.length)}) — قلّل الجودة أو البُعد للحصول على رابط أقصر.</p>}
